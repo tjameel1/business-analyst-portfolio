@@ -1,0 +1,479 @@
+---
+title: "Capstone Analysis: Digital Banking Adoption"
+author: "TJ"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Introduction
+
+In this project, I explore the factors that may affect digital banking and mobile banking adoption. As banks continue to expand their digital services, it is important to understand why some customers use these services while others may be hesitant. To analyze the data, I use three analytical methods: classification models, clustering, and regression analysis. These methods help identify important factors related to adoption, group similar customers together, and predict digital banking engagement.
+
+The dataset used for this project is stored in the following folder on my computer:
+
+```{r data-folder}
+data_folder <- "/Users/lj/Downloads/CAPSTONE"
+data_folder
+```
+
+# Load Packages
+
+The code below loads the packages needed for the analysis. If a package is not already installed, the code installs it first.
+
+```{r load-packages}
+packages <- c(
+  "tidyverse",
+  "caret",
+  "rpart",
+  "rpart.plot",
+  "factoextra",
+  "cluster",
+  "broom"
+)
+
+installed_packages <- rownames(installed.packages())
+
+for(pkg in packages){
+  if(!(pkg %in% installed_packages)){
+    install.packages(pkg)
+  }
+  library(pkg, character.only = TRUE)
+}
+```
+
+# Import Data
+
+The code below automatically finds the CSV file stored in the CAPSTONE folder and loads it into R so it can be used for the analysis.
+
+```{r import-data}
+csv_files <- list.files(
+  data_folder,
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+
+if(length(csv_files) == 0){
+  stop("No CSV file was found in the CAPSTONE folder. Please save the dataset as a CSV file in that folder.")
+}
+
+banking <- read.csv(csv_files[1], stringsAsFactors = FALSE)
+
+cat("File imported:", csv_files[1], "\n")
+cat("Number of rows:", nrow(banking), "\n")
+cat("Number of columns:", ncol(banking), "\n")
+```
+
+# Review Data Structure
+
+Before running the models, I first review the dataset structure and column names. This helps me understand which variables are available and whether any adjustments are needed before analysis.
+
+```{r review-data}
+str(banking)
+names(banking)
+summary(banking)
+```
+
+# Data Cleaning
+
+This section removes completely empty rows and converts character variables into factor variables. This helps prepare the dataset for the classification, clustering, and regression models.
+
+```{r clean-data}
+banking <- banking %>%
+  filter(if_any(everything(), ~ !is.na(.)))
+
+banking <- banking %>%
+  mutate(across(where(is.character), as.factor))
+
+# Remove respondent ID from modeling if it exists
+if("ResNo" %in% names(banking)){
+  banking_model <- banking %>% select(-ResNo)
+} else {
+  banking_model <- banking
+}
+
+str(banking_model)
+```
+
+# Target Variable
+
+For the classification analysis, the target variable should represent whether a customer uses or adopts mobile banking services. In this dataset, the variable `BnkMBServ` is used as the target variable because it appears to represent mobile banking service usage.
+
+```{r target-variable}
+adoption_column <- "BnkMBServ"
+
+if(!(adoption_column %in% names(banking_model))){
+  stop("The target variable BnkMBServ was not found in the dataset. Please check the column names.")
+}
+
+banking_model[[adoption_column]] <- as.factor(banking_model[[adoption_column]])
+
+cat("Target Variable Used:", adoption_column, "\n")
+table(banking_model[[adoption_column]])
+```
+
+# Classification Models
+
+The goal of the classification analysis is to predict whether a customer is likely to use mobile banking services. To accomplish this, I use logistic regression and decision tree models. These models help identify which customer characteristics and survey factors may be related to mobile banking adoption.
+
+## Prepare Data for Classification
+
+For the initial classification models, I include the available variables except for the mobile banking service variable, which is the outcome being predicted. Some variables with only one value are removed because they do not help the model.
+
+```{r classification-prep}
+classification_data <- banking_model %>%
+  drop_na()
+
+# Remove variables with only one unique value
+classification_data <- classification_data %>%
+  select(where(~ length(unique(.)) > 1))
+
+# Make sure the target variable is still included
+if(!(adoption_column %in% names(classification_data))){
+  stop("The adoption target variable was removed during cleaning. Please review the dataset.")
+}
+
+# Remove outcome levels with very small counts if needed
+classification_data[[adoption_column]] <- droplevels(as.factor(classification_data[[adoption_column]]))
+
+cat("Classification data rows:", nrow(classification_data), "\n")
+cat("Target variable distribution:\n")
+print(table(classification_data[[adoption_column]]))
+```
+
+## Train and Test Split
+
+The dataset is split into training and testing data. The training data is used to build the models, while the testing data is used to evaluate how well the models perform on data they have not seen before.
+
+```{r train-test-split}
+set.seed(123)
+
+if(length(unique(classification_data[[adoption_column]])) < 2){
+  stop("The target variable has fewer than two classes, so classification models cannot be created.")
+}
+
+train_index <- createDataPartition(
+  classification_data[[adoption_column]],
+  p = 0.70,
+  list = FALSE
+)
+
+train_data <- classification_data[train_index, ]
+test_data <- classification_data[-train_index, ]
+
+cat("Training rows:", nrow(train_data), "\n")
+cat("Testing rows:", nrow(test_data), "\n")
+```
+
+## Logistic Regression
+
+Logistic regression is used to examine the relationship between the predictors and mobile banking usage. To keep the model stable, this section uses survey response variables that are numeric or can be treated as numeric.
+
+```{r logistic-regression}
+# Create a safer dataset for logistic regression using numeric predictors only
+log_data <- classification_data %>%
+  mutate(across(everything(), ~ suppressWarnings(as.numeric(as.character(.)))))
+
+# Add target back as factor from original classification data
+log_data[[adoption_column]] <- classification_data[[adoption_column]]
+
+# Remove columns that became all NA, except target
+log_data <- log_data %>%
+  select(where(~ !all(is.na(.))))
+
+# Remove rows with missing values
+log_data <- log_data %>% drop_na()
+
+# Keep only predictors and target
+predictors <- setdiff(names(log_data), adoption_column)
+
+# Limit predictors if dataset has many columns to avoid model problems
+preferred_predictors <- c(
+  "AgeCat", "IncomeRng", "HLvlEdu", "BankAcc", "NrBnkTym",
+  "AccessP1", "AccessP2", "AccessP3", "AccessP4",
+  "AccessC1", "AccessC2", "AccessC3", "AccessC4",
+  "SU1", "SU2", "SU3", "SU4", "SU5", "SU6", "SU7", "SU8", "SU9", "SU10", "SU11",
+  "BPE1", "BPE2", "BPE3", "BPE4",
+  "BEE1", "BEE2", "BEE3", "BEE4",
+  "BSI1", "BSI2", "BSI3", "BSI4"
+)
+
+model_predictors <- intersect(preferred_predictors, predictors)
+
+if(length(model_predictors) < 2){
+  model_predictors <- predictors[1:min(10, length(predictors))]
+}
+
+log_formula <- as.formula(
+  paste(adoption_column, "~", paste(model_predictors, collapse = " + "))
+)
+
+set.seed(123)
+log_train_index <- createDataPartition(log_data[[adoption_column]], p = 0.70, list = FALSE)
+log_train <- log_data[log_train_index, ]
+log_test <- log_data[-log_train_index, ]
+
+log_model <- glm(
+  log_formula,
+  data = log_train,
+  family = binomial
+)
+
+summary(log_model)
+```
+
+## Logistic Regression Accuracy
+
+This section evaluates the logistic regression model by comparing the predicted classes to the actual classes in the test data.
+
+```{r logistic-accuracy}
+# This works best when the target variable has two classes
+if(length(levels(log_train[[adoption_column]])) == 2){
+  positive_class <- levels(log_train[[adoption_column]])[2]
+  negative_class <- levels(log_train[[adoption_column]])[1]
+  
+  log_prob <- predict(log_model, newdata = log_test, type = "response")
+  log_pred <- ifelse(log_prob >= 0.5, positive_class, negative_class)
+  log_pred <- factor(log_pred, levels = levels(log_test[[adoption_column]]))
+  
+  confusionMatrix(log_pred, log_test[[adoption_column]])
+} else {
+  cat("Logistic regression accuracy table was skipped because the target variable has more than two classes.\n")
+}
+```
+
+## Decision Tree Model
+
+The decision tree model provides a visual way to understand how different factors may contribute to mobile banking usage. This can make the results easier to interpret compared to some other models.
+
+```{r decision-tree}
+tree_formula <- as.formula(
+  paste(adoption_column, "~ .")
+)
+
+tree_model <- rpart(
+  tree_formula,
+  data = train_data,
+  method = "class",
+  control = rpart.control(cp = 0.01)
+)
+
+rpart.plot(tree_model, main = "Decision Tree for Mobile Banking Adoption")
+```
+
+## Decision Tree Accuracy
+
+```{r decision-tree-accuracy}
+tree_pred <- predict(tree_model, newdata = test_data, type = "class")
+confusionMatrix(tree_pred, test_data[[adoption_column]])
+```
+
+## Classification Interpretation
+
+The classification models help identify the factors that may influence digital banking adoption. Logistic regression is used to examine the relationship between customer characteristics and adoption, while the decision tree provides an easy-to-understand visual representation of how different factors contribute to adoption decisions. Together, these models help explain customer behavior and highlight the variables that may be important in predicting mobile banking usage.
+
+# Clustering Analysis
+
+The goal of clustering is to group customers based on similarities in their digital banking usage, attitudes, and demographic characteristics. By identifying these groups, I can better understand the different types of customers in the dataset and how they interact with digital banking services. The resulting segments may include highly engaged digital users, hesitant users, low-tech users, or customers with stronger security concerns.
+
+## Prepare Data for Clustering
+
+Since clustering works with numeric data, this code selects numeric variables from the dataset. The mobile banking service target variable is removed from the clustering analysis so that customers are grouped based on their characteristics rather than the outcome being analyzed.
+
+```{r clustering-prep}
+cluster_data <- banking_model %>%
+  select(-any_of(adoption_column)) %>%
+  mutate(across(everything(), ~ suppressWarnings(as.numeric(as.character(.))))) %>%
+  select(where(~ !all(is.na(.)))) %>%
+  drop_na()
+
+# Remove variables with no variation
+cluster_data <- cluster_data %>%
+  select(where(~ sd(., na.rm = TRUE) > 0))
+
+cat("Rows used for clustering:", nrow(cluster_data), "\n")
+cat("Variables used for clustering:", ncol(cluster_data), "\n")
+```
+
+## Standardize Variables
+
+The clustering variables are standardized so that variables measured on different scales can be compared fairly.
+
+```{r standardize-clustering}
+cluster_scaled <- scale(cluster_data)
+```
+
+## K-Means Clustering
+
+For this analysis, I use four clusters to represent four potential customer segments. The goal is to identify groups of customers who share similar characteristics, behaviors, and attitudes toward digital banking.
+
+```{r kmeans-clustering}
+set.seed(123)
+
+kmeans_model <- kmeans(
+  cluster_scaled,
+  centers = 4,
+  nstart = 25
+)
+
+cluster_results <- cluster_data %>%
+  mutate(Cluster = as.factor(kmeans_model$cluster))
+
+table(cluster_results$Cluster)
+```
+
+## Cluster Visualization
+
+```{r cluster-visualization, fig.width=8, fig.height=6}
+fviz_cluster(
+  kmeans_model,
+  data = cluster_scaled,
+  geom = "point",
+  main = "Customer Segments Based on Digital Banking Factors"
+)
+```
+
+## Cluster Profiles
+
+The table below shows the average values for each cluster. These averages can be used to describe each customer segment.
+
+```{r cluster-profiles}
+cluster_profiles <- cluster_results %>%
+  group_by(Cluster) %>%
+  summarise(across(everything(), mean, na.rm = TRUE))
+
+cluster_profiles
+```
+
+## Clustering Interpretation
+
+The clustering analysis groups customers into four segments based on similarities in their responses. After reviewing the cluster profiles, each group can be interpreted and assigned a meaningful description. For example, one cluster may represent highly digital users, while another may represent customers who are hesitant or more concerned about security. These segments can help banks better understand customer needs and design more targeted digital banking support.
+
+# Regression Analysis
+
+Regression analysis is used to examine how customer characteristics relate to digital banking engagement levels. This approach helps identify which factors may have the greatest impact on customer usage and engagement with digital banking services.
+
+In this dataset, the variables `BBI1`, `BBI2`, and `BBI3` appear to represent behavioral intention or banking behavior intention items. I create an average behavioral intention score and use it as the outcome variable for regression analysis.
+
+## Create Regression Outcome
+
+```{r regression-outcome}
+bbi_vars <- c("BBI1", "BBI2", "BBI3")
+available_bbi_vars <- intersect(bbi_vars, names(banking_model))
+
+if(length(available_bbi_vars) == 0){
+  stop("No BBI variables were found for the regression outcome.")
+}
+
+regression_data <- banking_model %>%
+  mutate(across(all_of(available_bbi_vars), ~ suppressWarnings(as.numeric(as.character(.))))) %>%
+  mutate(Digital_Engagement_Score = rowMeans(across(all_of(available_bbi_vars)), na.rm = TRUE))
+
+summary(regression_data$Digital_Engagement_Score)
+```
+
+## Prepare Regression Predictors
+
+```{r regression-prep}
+regression_data <- regression_data %>%
+  select(-any_of(c(adoption_column, available_bbi_vars))) %>%
+  mutate(across(everything(), ~ suppressWarnings(as.numeric(as.character(.))))) %>%
+  select(where(~ !all(is.na(.)))) %>%
+  mutate(Digital_Engagement_Score = banking_model %>%
+           mutate(across(all_of(available_bbi_vars), ~ suppressWarnings(as.numeric(as.character(.))))) %>%
+           transmute(score = rowMeans(across(all_of(available_bbi_vars)), na.rm = TRUE)) %>%
+           pull(score)) %>%
+  drop_na()
+
+# Remove variables with no variation
+regression_data <- regression_data %>%
+  select(where(~ sd(., na.rm = TRUE) > 0))
+
+cat("Rows used for regression:", nrow(regression_data), "\n")
+cat("Variables used for regression:", ncol(regression_data), "\n")
+```
+
+## Linear Regression Model
+
+```{r linear-regression}
+reg_predictors <- setdiff(names(regression_data), "Digital_Engagement_Score")
+
+preferred_reg_predictors <- c(
+  "AgeCat", "IncomeRng", "HLvlEdu", "BankAcc", "NrBnkTym",
+  "AccessP1", "AccessP2", "AccessP3", "AccessP4",
+  "AccessC1", "AccessC2", "AccessC3", "AccessC4",
+  "SU1", "SU2", "SU3", "SU4", "SU5", "SU6", "SU7", "SU8", "SU9", "SU10", "SU11",
+  "BPE1", "BPE2", "BPE3", "BPE4",
+  "BEE1", "BEE2", "BEE3", "BEE4",
+  "BSI1", "BSI2", "BSI3", "BSI4"
+)
+
+reg_model_predictors <- intersect(preferred_reg_predictors, reg_predictors)
+
+if(length(reg_model_predictors) < 2){
+  reg_model_predictors <- reg_predictors[1:min(10, length(reg_predictors))]
+}
+
+reg_formula <- as.formula(
+  paste("Digital_Engagement_Score ~", paste(reg_model_predictors, collapse = " + "))
+)
+
+reg_model <- lm(
+  reg_formula,
+  data = regression_data
+)
+
+summary(reg_model)
+```
+
+## Regression Visualization
+
+```{r regression-plot, fig.width=7, fig.height=5}
+regression_data$Predicted_Engagement <- predict(reg_model, newdata = regression_data)
+
+ggplot(regression_data, aes(x = Predicted_Engagement, y = Digital_Engagement_Score)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "Predicted vs. Actual Digital Engagement Score",
+    x = "Predicted Digital Engagement Score",
+    y = "Actual Digital Engagement Score"
+  ) +
+  theme_minimal()
+```
+
+## Regression Interpretation
+
+The regression model helps explain which factors may be related to digital engagement levels. By reviewing the model results, I can identify which variables have stronger relationships with the digital engagement score. This analysis provides insight into the factors that may influence how likely customers are to continue using or engaging with mobile banking services.
+
+# Export Data for Tableau
+
+Later, I plan to create Tableau dashboards to visualize adoption trends, customer segments, and digital engagement patterns. The code below saves a cleaned version of the data and the cluster results so they can be used in Tableau.
+
+```{r export-tableau}
+output_folder <- data_folder
+
+write.csv(
+  banking_model,
+  file.path(output_folder, "cleaned_banking_data_for_tableau.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  cluster_results,
+  file.path(output_folder, "customer_clusters_for_tableau.csv"),
+  row.names = FALSE
+)
+
+cat("Files saved for Tableau in:", output_folder)
+```
+
+# Conclusion
+
+In this project, I used classification, clustering, and regression techniques to analyze factors related to digital banking adoption. The classification models were used to predict mobile banking usage, the clustering analysis grouped customers into meaningful segments, and the regression model examined factors related to digital engagement. Overall, these methods helped identify patterns in customer behavior and provided insights that may help financial institutions better understand digital banking adoption and customer needs.
